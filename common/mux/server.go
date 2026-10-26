@@ -2,6 +2,7 @@ package mux
 
 import (
 	"context"
+	stderrors "errors"
 	"io"
 	"time"
 
@@ -209,28 +210,40 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
 				errors.LogWarningInner(ctx, errors.New("conflict"), "XUDP hit ", meta.GlobalID)
 				// It's not a good idea to return an err here, so just let client wait.
 				// Client will receive an End frame after sending a Keep frame.
+				buf.ReleaseMulti(mb)
 				return nil
 			}
 			x.Status = Initializing
 			XUDPManager.Unlock()
-			x.Mux.Close(false) // detach from previous Mux
-			b := buf.New()
-			b.Write(mb[0].Bytes())
-			b.UDP = mb[0].UDP
-			if err = x.Mux.output.WriteMultiBuffer(mb); err != nil {
-				x.Interrupt()
-				mb = buf.MultiBuffer{b}
-			} else {
-				b.Release()
-				mb = nil
+			reused, err := rebindXUDP(ctx, w.dispatcher, x)
+			if err != nil {
+				buf.ReleaseMulti(mb)
+				return errors.New("XUDP reuse rejected").Base(err)
 			}
-			errors.LogInfoInner(ctx, err, "XUDP hit ", meta.GlobalID)
+			if reused == x {
+				x.Mux.Close(false) // detach from previous Mux
+				b := buf.New()
+				b.Write(mb[0].Bytes())
+				b.UDP = mb[0].UDP
+				if err = x.Mux.output.WriteMultiBuffer(mb); err != nil {
+					x.Interrupt()
+					mb = buf.MultiBuffer{b}
+				} else {
+					b.Release()
+					mb = nil
+				}
+				errors.LogInfoInner(ctx, err, "XUDP hit ", meta.GlobalID)
+			} else {
+				x = reused // mb is dispatched below through a fresh link
+				errors.LogInfo(ctx, "XUDP replaced ", meta.GlobalID)
+			}
 		}
 		if mb != nil {
 			ctx = session.ContextWithTimeoutOnly(ctx, true)
 			// Actually, it won't return an error in Xray-core's implementations.
 			link, err := w.dispatcher.Dispatch(ctx, meta.Target)
 			if err != nil {
+				buf.ReleaseMulti(mb)
 				XUDPManager.Lock()
 				delete(XUDPManager.Map, x.GlobalID)
 				XUDPManager.Unlock()
@@ -295,6 +308,38 @@ func (w *ServerWorker) handleStatusNew(ctx context.Context, meta *FrameMetadata,
 		return buf.Copy(rr, buf.Discard)
 	}
 	return err
+}
+
+// Reusing a cached XUDP link bypasses Dispatch. Give an embedding dispatcher
+// the same admission opportunity before writing any data through that link.
+// It returns x when the link may be reused. A link the dispatcher does not own
+// is discarded and replaced by a fresh Initializing entry, which the caller
+// dispatches anew instead of breaking the whole Mux connection.
+func rebindXUDP(ctx context.Context, dispatcher routing.Dispatcher, x *XUDP) (*XUDP, error) {
+	rebinder, ok := dispatcher.(routing.SessionRebinder)
+	if !ok {
+		return x, nil
+	}
+	err := rebinder.RebindSession(ctx, &transport.Link{Reader: x.Mux.input, Writer: x.Mux.output})
+	if err == nil {
+		return x, nil
+	}
+	x.Interrupt()
+	var fresh *XUDP
+	notOwned := stderrors.Is(err, routing.ErrSessionNotOwned)
+	XUDPManager.Lock()
+	if notOwned {
+		// Initializing entries are skipped by other workers and the expiry loop.
+		fresh = &XUDP{GlobalID: x.GlobalID}
+		XUDPManager.Map[x.GlobalID] = fresh
+	} else if XUDPManager.Map[x.GlobalID] == x {
+		delete(XUDPManager.Map, x.GlobalID)
+	}
+	XUDPManager.Unlock()
+	if notOwned {
+		return fresh, nil
+	}
+	return nil, err
 }
 
 func (w *ServerWorker) handleStatusKeep(meta *FrameMetadata, reader *buf.BufferedReader) error {

@@ -20,6 +20,13 @@ type Dispatcher interface {
 	DispatchLink(ctx context.Context, dest net.Destination, link *transport.Link) error
 }
 
+// SessionRebinder is an optional dispatcher hook for protocols that reuse a
+// previously dispatched link. It must run before delivering data from a new
+// authenticated session to that link. Policy remains with the dispatcher.
+type SessionRebinder interface {
+	RebindSession(ctx context.Context, link *transport.Link) error
+}
+
 // DispatcherType returns the type of Dispatcher interface. Can be used to implement common.HasType.
 //
 // xray:api:stable

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,9 +35,22 @@ type TimeoutWrapperReader struct {
 	mb   MultiBuffer
 	err  error
 	done chan struct{}
+
+	mu        sync.Mutex
+	forcedErr error
+	hasForced bool
 }
 
 func (r *TimeoutWrapperReader) ReadMultiBuffer() (MultiBuffer, error) {
+	r.mu.Lock()
+	if r.hasForced {
+		err := r.forcedErr
+		r.hasForced = false
+		r.forcedErr = nil
+		r.mu.Unlock()
+		return nil, err
+	}
+	r.mu.Unlock()
 	if r.done != nil {
 		<-r.done
 		r.done = nil
@@ -52,7 +66,51 @@ func (r *TimeoutWrapperReader) ReadMultiBuffer() (MultiBuffer, error) {
 	return r.mb, r.err
 }
 
+// forcedErrorReader is implemented by pipe.Reader: a forced error also wakes a
+// read that is already blocked inside it.
+type forcedErrorReader interface {
+	ReturnAnError(error)
+	Recover() error
+}
+
+// ReturnAnError makes the pending or next read fail with err. It is forwarded
+// to the wrapped reader when supported; a local flag cannot wake a read that
+// is already blocked there, and Recover would then silently drop it.
+func (r *TimeoutWrapperReader) ReturnAnError(err error) {
+	if inner, ok := r.Reader.(forcedErrorReader); ok {
+		inner.ReturnAnError(err)
+		return
+	}
+	r.mu.Lock()
+	r.forcedErr = err
+	r.hasForced = true
+	r.mu.Unlock()
+}
+
+func (r *TimeoutWrapperReader) Recover() (err error) {
+	if inner, ok := r.Reader.(forcedErrorReader); ok {
+		return inner.Recover()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hasForced {
+		err = r.forcedErr
+		r.hasForced = false
+		r.forcedErr = nil
+	}
+	return
+}
+
 func (r *TimeoutWrapperReader) ReadMultiBufferTimeout(duration time.Duration) (MultiBuffer, error) {
+	r.mu.Lock()
+	if r.hasForced {
+		err := r.forcedErr
+		r.hasForced = false
+		r.forcedErr = nil
+		r.mu.Unlock()
+		return nil, err
+	}
+	r.mu.Unlock()
 	if r.done == nil {
 		r.done = make(chan struct{})
 		go func() {

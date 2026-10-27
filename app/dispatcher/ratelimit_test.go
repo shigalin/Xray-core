@@ -111,14 +111,33 @@ func TestWrapLinkKeepsStatsWriterOutermost(t *testing.T) {
 		t.Fatalf("AddFeature(bandwidth) error = %v", err)
 	}
 	ctx := context.WithValue(context.Background(), core.XrayKey(1), inst)
-	ctx = session.ContextWithInbound(ctx, &session.Inbound{User: &protocol.MemoryUser{Email: "user@example.com"}, Source: net.TCPDestination(net.IPAddress([]byte{127, 0, 0, 1}), 1234)})
+	inbound := &session.Inbound{User: &protocol.MemoryUser{Email: "user@example.com"}, Source: net.TCPDestination(net.IPAddress([]byte{127, 0, 0, 1}), 1234), CanSpliceCopy: 2}
+	ctx = session.ContextWithInbound(ctx, inbound)
 	link := &transport.Link{Reader: stubReader{}, Writer: &stubWriter{}}
 	_ = WrapLink(ctx, downlinkStatsPolicy{}, countingStats{counter: &testCounter{}}, link)
+	if inbound.CanSpliceCopy != 3 {
+		t.Fatalf("limited user CanSpliceCopy = %d, want 3 (kernel splice bypasses the limiter)", inbound.CanSpliceCopy)
+	}
 	stat, ok := link.Writer.(*SizeStatWriter)
 	if !ok {
 		t.Fatalf("outermost writer = %T, want *SizeStatWriter", link.Writer)
 	}
 	if _, ok := stat.Writer.(*RateLimitWriter); !ok {
 		t.Fatalf("writer inside stats = %T, want *RateLimitWriter", stat.Writer)
+	}
+}
+
+func TestWrapLinkKeepsSpliceForUnlimitedUser(t *testing.T) {
+	inst := new(core.Instance)
+	if err := inst.AddFeature(bandwidthfeat.New()); err != nil {
+		t.Fatalf("AddFeature(bandwidth) error = %v", err)
+	}
+	ctx := context.WithValue(context.Background(), core.XrayKey(1), inst)
+	inbound := &session.Inbound{User: &protocol.MemoryUser{Email: "user@example.com"}, Source: net.TCPDestination(net.IPAddress([]byte{127, 0, 0, 1}), 1234), CanSpliceCopy: 2}
+	ctx = session.ContextWithInbound(ctx, inbound)
+	link := &transport.Link{Reader: stubReader{}, Writer: &stubWriter{}}
+	_ = WrapLink(ctx, downlinkStatsPolicy{}, countingStats{counter: &testCounter{}}, link)
+	if inbound.CanSpliceCopy != 2 {
+		t.Fatalf("unlimited user CanSpliceCopy = %d, want 2", inbound.CanSpliceCopy)
 	}
 }

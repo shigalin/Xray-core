@@ -219,6 +219,11 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 		// The limiter goes inside the stats writer: splice copy counts user
 		// traffic only when the link writer itself is a SizeStatWriter.
 		link.Writer = applyBandwidthLimit(ctx, link.Writer, bandwidthManager, user)
+		if _, limited := link.Writer.(*RateLimitWriter); limited {
+			// Kernel splice would bypass the limiter; copy in user space, as on
+			// platforms without splice. Vision moves 2 to 1 only, never from 3.
+			sessionInbound.CanSpliceCopy = 3
+		}
 		if p.Stats.UserDownlink {
 			name := "user>>>" + user.Email + ">>>traffic>>>downlink"
 			if c, _ := statsManager.GetOrRegisterCounter(name); c != nil {

@@ -594,6 +594,16 @@ func (ln *Listener) Close() error {
 	return errors.New("listener does not have an HTTP/3 server or a net.listener")
 }
 
+// StopAccepting implements internet.AcceptStopper for HTTP/1.1 and HTTP/2: the
+// server stops serving the listener and keeps its active connections. HTTP/3
+// serves every connection on one UDP socket, which cannot stop accepting alone.
+func (ln *Listener) StopAccepting() error {
+	if ln.h3server == nil && ln.listener != nil {
+		return ln.listener.Close()
+	}
+	return errors.New("HTTP/3 listener cannot stop accepting without closing its connections")
+}
+
 func getTLSConfig(streamSettings *internet.MemoryStreamConfig) *gotls.Config {
 	config := tls.ConfigFromStreamSettings(streamSettings)
 	if config == nil {

@@ -155,6 +155,12 @@ func (ln *Listener) Close() error {
 	return ln.listener.Close()
 }
 
+// StopAccepting implements internet.AcceptStopper. The HTTP server stops
+// serving the listener but keeps the connections it already hijacked.
+func (ln *Listener) StopAccepting() error {
+	return ln.listener.Close()
+}
+
 func init() {
 	common.Must(internet.RegisterTransportListener(protocolName, ListenWS))
 }

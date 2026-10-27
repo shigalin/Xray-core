@@ -129,6 +129,12 @@ func (v *Listener) Close() error {
 	return v.listener.Close()
 }
 
+// StopAccepting implements internet.AcceptStopper; accepted connections are
+// independent of the listening socket.
+func (v *Listener) StopAccepting() error {
+	return v.listener.Close()
+}
+
 func init() {
 	common.Must(internet.RegisterTransportListener(protocolName, ListenTCP))
 }

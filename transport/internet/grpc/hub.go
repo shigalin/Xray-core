@@ -47,6 +47,14 @@ func (l Listener) Close() error {
 	return nil
 }
 
+// StopAccepting implements internet.AcceptStopper. GracefulStop closes the
+// listener at once and lets running streams finish; it blocks until they do,
+// so it runs in the background. A later Close still force-stops the server.
+func (l Listener) StopAccepting() error {
+	go l.s.GracefulStop()
+	return nil
+}
+
 func (l Listener) Addr() net.Addr {
 	return l.local
 }

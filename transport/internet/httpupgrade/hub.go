@@ -31,6 +31,12 @@ func (s *server) Close() error {
 	return s.innnerListener.Close()
 }
 
+// StopAccepting implements internet.AcceptStopper; upgraded connections are
+// independent of the listening socket.
+func (s *server) StopAccepting() error {
+	return s.innnerListener.Close()
+}
+
 func (s *server) Addr() net.Addr {
 	return nil
 }

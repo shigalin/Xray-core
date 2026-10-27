@@ -165,6 +165,19 @@ func (w *tcpWorker) Close() error {
 	return nil
 }
 
+// StopAccepting closes the listener only; accepted connections keep running.
+func (w *tcpWorker) StopAccepting() error { return stopAccepting(w.hub) }
+
+func stopAccepting(hub internet.Listener) error {
+	if s, ok := hub.(internet.AcceptStopper); ok {
+		return s.StopAccepting()
+	}
+	if hub == nil {
+		return nil
+	}
+	return errors.New("listener cannot stop accepting without closing its connections")
+}
+
 func (w *tcpWorker) Port() net.Port {
 	return w.port
 }
@@ -533,6 +546,9 @@ func (w *dsWorker) Start() error {
 	w.hub = hub
 	return nil
 }
+
+// StopAccepting closes the listener only; accepted connections keep running.
+func (w *dsWorker) StopAccepting() error { return stopAccepting(w.hub) }
 
 func (w *dsWorker) Close() error {
 	var errs []interface{}

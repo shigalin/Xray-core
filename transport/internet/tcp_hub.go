@@ -27,6 +27,13 @@ type Listener interface {
 	Addr() net.Addr
 }
 
+// AcceptStopper is implemented by listeners that can stop accepting new
+// connections while established ones keep running. A replaced instance uses it
+// to drain without competing for new connections on a shared SO_REUSEPORT port.
+type AcceptStopper interface {
+	StopAccepting() error
+}
+
 // ListenUnix is the UDS version of ListenTCP
 func ListenUnix(ctx context.Context, address net.Address, settings *MemoryStreamConfig, handler ConnHandler) (Listener, error) {
 	if settings == nil {

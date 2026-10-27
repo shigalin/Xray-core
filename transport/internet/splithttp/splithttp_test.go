@@ -465,3 +465,72 @@ func Test_maxUpload(t *testing.T) {
 
 	common.Must(listen.Close())
 }
+
+func stopAcceptingClient(t *testing.T, h2c bool) (internet.Listener, *http.Client, string) {
+	t.Helper()
+	listenPort := tcp.PickPort()
+	streamSettings := &internet.MemoryStreamConfig{
+		ProtocolName:     "splithttp",
+		ProtocolSettings: &Config{Path: "shs"},
+	}
+	listen, err := ListenXH(context.Background(), net.LocalHostIP, listenPort, streamSettings, func(conn stat.Connection) {
+		go func() { _ = conn.Close() }()
+	})
+	common.Must(err)
+	t.Cleanup(func() { listen.Close() })
+	transport := &http.Transport{}
+	if h2c {
+		protocols := new(http.Protocols)
+		protocols.SetUnencryptedHTTP2(true)
+		transport.Protocols = protocols
+	}
+	return listen, &http.Client{Transport: transport}, "http://" + net.LocalHostIP.String() + ":" + listenPort.String()
+}
+
+// A stopped listener must refuse new requests on its established keep-alive
+// connections as well, not only new TCP connections.
+func Test_StopAcceptingEndsKeepAliveRequests(t *testing.T) {
+	listen, client, url := stopAcceptingClient(t, false)
+	resp, err := client.Get(url)
+	common.Must(err)
+	resp.Body.Close()
+	common.Must(listen.(internet.AcceptStopper).StopAccepting())
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := client.Get(url)
+		if err != nil {
+			return
+		}
+		resp.Body.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("stopped listener still served requests on the kept-alive connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func Test_StopAcceptingEndsH2CStreams(t *testing.T) {
+	if runtime.GOARCH == "arm64" {
+		return
+	}
+	listen, client, url := stopAcceptingClient(t, true)
+	resp, err := client.Get(url)
+	common.Must(err)
+	resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatal("Expected h2 but got:", resp.ProtoMajor)
+	}
+	common.Must(listen.(internet.AcceptStopper).StopAccepting())
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := client.Get(url)
+		if err != nil {
+			return
+		}
+		resp.Body.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("stopped listener still accepted new streams on the HTTP/2 connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

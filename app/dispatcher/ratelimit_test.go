@@ -79,3 +79,46 @@ func TestRateLimitWriterRespectsCanceledContext(t *testing.T) {
 		t.Fatal("expected canceled context to abort wait")
 	}
 }
+
+type testCounter struct{ v int64 }
+
+func (c *testCounter) Value() int64      { return c.v }
+func (c *testCounter) Set(v int64) int64 { old := c.v; c.v = v; return old }
+func (c *testCounter) Add(v int64) int64 { old := c.v; c.v += v; return old }
+
+type countingStats struct {
+	featurestats.Manager
+	counter *testCounter
+}
+
+func (m countingStats) GetOrRegisterCounter(string) (featurestats.Counter, error) {
+	return m.counter, nil
+}
+
+type downlinkStatsPolicy struct{ featurepolicy.Manager }
+
+func (downlinkStatsPolicy) ForLevel(uint32) featurepolicy.Session {
+	return featurepolicy.Session{Stats: featurepolicy.Stats{UserDownlink: true}}
+}
+
+// Splice copy counts user traffic only when the link writer itself is a
+// SizeStatWriter, so the bandwidth limiter must sit inside it.
+func TestWrapLinkKeepsStatsWriterOutermost(t *testing.T) {
+	inst := new(core.Instance)
+	bm := bandwidthfeat.New()
+	bm.SetUserLimit("user@example.com", 1024)
+	if err := inst.AddFeature(bm); err != nil {
+		t.Fatalf("AddFeature(bandwidth) error = %v", err)
+	}
+	ctx := context.WithValue(context.Background(), core.XrayKey(1), inst)
+	ctx = session.ContextWithInbound(ctx, &session.Inbound{User: &protocol.MemoryUser{Email: "user@example.com"}, Source: net.TCPDestination(net.IPAddress([]byte{127, 0, 0, 1}), 1234)})
+	link := &transport.Link{Reader: stubReader{}, Writer: &stubWriter{}}
+	_ = WrapLink(ctx, downlinkStatsPolicy{}, countingStats{counter: &testCounter{}}, link)
+	stat, ok := link.Writer.(*SizeStatWriter)
+	if !ok {
+		t.Fatalf("outermost writer = %T, want *SizeStatWriter", link.Writer)
+	}
+	if _, ok := stat.Writer.(*RateLimitWriter); !ok {
+		t.Fatalf("writer inside stats = %T, want *RateLimitWriter", stat.Writer)
+	}
+}

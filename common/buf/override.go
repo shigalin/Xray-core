@@ -1,6 +1,7 @@
 package buf
 
 import (
+	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/net"
 )
 
@@ -22,6 +23,9 @@ func (r *EndpointOverrideReader) ReadMultiBuffer() (MultiBuffer, error) {
 	return mb, err
 }
 
+// Interrupt forwards to the wrapped reader; the embedded interface would hide it.
+func (r *EndpointOverrideReader) Interrupt() { common.Interrupt(r.Reader) }
+
 type EndpointOverrideWriter struct {
 	Writer
 	Dest         net.Address
@@ -36,3 +40,8 @@ func (w *EndpointOverrideWriter) WriteMultiBuffer(mb MultiBuffer) error {
 	}
 	return w.Writer.WriteMultiBuffer(mb)
 }
+
+// Close and Interrupt forward to the wrapped writer; the embedded interface
+// would hide them and leave the link (and anything observing it) open.
+func (w *EndpointOverrideWriter) Close() error { return common.Close(w.Writer) }
+func (w *EndpointOverrideWriter) Interrupt()   { common.Interrupt(w.Writer) }

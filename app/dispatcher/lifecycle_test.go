@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/session"
+	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/transport/pipe"
 )
@@ -31,5 +34,28 @@ func TestGetLinkReportsDownlinkCompletionWithoutWrappingReaders(t *testing.T) {
 	common.Interrupt(out.Writer)
 	if observer.closed != 1 {
 		t.Fatalf("completion notifications = %d, want 1", observer.closed)
+	}
+}
+
+type testOutboundObserver struct {
+	testSessionLifecycle
+	returned int
+}
+
+func (o *testOutboundObserver) OutboundReturned() { o.returned++ }
+
+type noHandlerManager struct{ outbound.Manager }
+
+func (noHandlerManager) GetDefaultHandler() outbound.Handler { return nil }
+
+func TestRoutedDispatchReportsOutboundReturn(t *testing.T) {
+	observer := &testOutboundObserver{}
+	ctx := routing.ContextWithSessionLifecycle(context.Background(), observer)
+	ctx = session.ContextWithOutbounds(ctx, []*session.Outbound{{}})
+	d := &DefaultDispatcher{ohm: noHandlerManager{}}
+	_, out := d.getLink(ctx)
+	d.routedDispatch(ctx, out, net.TCPDestination(net.LocalHostIP, 80))
+	if observer.returned != 1 {
+		t.Fatalf("outbound return notifications = %d, want 1", observer.returned)
 	}
 }

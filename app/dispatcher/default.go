@@ -216,6 +216,9 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 				link.Reader.(*buf.TimeoutWrapperReader).Counter = c
 			}
 		}
+		// The limiter goes inside the stats writer: splice copy counts user
+		// traffic only when the link writer itself is a SizeStatWriter.
+		link.Writer = applyBandwidthLimit(ctx, link.Writer, bandwidthManager, user)
 		if p.Stats.UserDownlink {
 			name := "user>>>" + user.Email + ">>>traffic>>>downlink"
 			if c, _ := statsManager.GetOrRegisterCounter(name); c != nil {
@@ -225,7 +228,6 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 				}
 			}
 		}
-		link.Writer = applyBandwidthLimit(ctx, link.Writer, bandwidthManager, user)
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, statsManager, user.Email, sessionInbound.Source.Address.String())
 		}
@@ -456,6 +458,9 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
 }
 
 func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
+	if observer, ok := routing.SessionLifecycleFromContext(ctx).(routing.OutboundObserver); ok {
+		defer observer.OutboundReturned()
+	}
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
 

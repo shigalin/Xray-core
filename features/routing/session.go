@@ -16,6 +16,13 @@ type SessionLifecycle interface {
 	DownlinkClosed()
 }
 
+// OutboundObserver is optionally implemented by a SessionLifecycle to learn
+// when the outbound handler has returned. A direct outbound returns after both
+// directions finished; one that hands the link to a Mux client returns early.
+type OutboundObserver interface {
+	OutboundReturned()
+}
+
 type sessionLifecycleKey struct{}
 
 func ContextWithSessionLifecycle(ctx context.Context, observer SessionLifecycle) context.Context {

@@ -29,6 +29,9 @@ import (
 
 type worker interface {
 	Start() error
+	// StopAccepting stops new connections while established ones keep
+	// running where the listener allows it; see stopOrClose.
+	StopAccepting() error
 	Close() error
 	Port() net.Port
 	Proxy() proxy.Inbound
@@ -165,17 +168,23 @@ func (w *tcpWorker) Close() error {
 	return nil
 }
 
-// StopAccepting closes the listener only; accepted connections keep running.
-func (w *tcpWorker) StopAccepting() error { return stopAccepting(w.hub) }
+func (w *tcpWorker) StopAccepting() error { return stopOrClose(w.hub) }
 
-func stopAccepting(hub internet.Listener) error {
-	if s, ok := hub.(internet.AcceptStopper); ok {
-		return s.StopAccepting()
-	}
+// stopOrClose stops the listener from accepting new connections. A listener
+// that cannot do so without dropping its established connections (one UDP
+// socket carrying every flow: Hysteria, mKCP, XHTTP over HTTP/3) is closed
+// instead, so a replaced instance never serves new connections; its clients
+// reconnect to the successor.
+func stopOrClose(hub internet.Listener) error {
 	if hub == nil {
 		return nil
 	}
-	return errors.New("listener cannot stop accepting without closing its connections")
+	if s, ok := hub.(internet.AcceptStopper); ok {
+		if err := s.StopAccepting(); err == nil {
+			return nil
+		}
+	}
+	return hub.Close()
 }
 
 func (w *tcpWorker) Port() net.Port {
@@ -443,6 +452,18 @@ func (w *udpWorker) Start() error {
 	return nil
 }
 
+// StopAccepting closes the socket: UDP has no accept step, and every flow of
+// this worker shares the one socket. Clients re-establish their sessions on
+// the successor.
+func (w *udpWorker) StopAccepting() error {
+	w.Lock()
+	defer w.Unlock()
+	if w.hub != nil {
+		return w.hub.Close()
+	}
+	return nil
+}
+
 func (w *udpWorker) Close() error {
 	w.Lock()
 	defer w.Unlock()
@@ -547,8 +568,7 @@ func (w *dsWorker) Start() error {
 	return nil
 }
 
-// StopAccepting closes the listener only; accepted connections keep running.
-func (w *dsWorker) StopAccepting() error { return stopAccepting(w.hub) }
+func (w *dsWorker) StopAccepting() error { return stopOrClose(w.hub) }
 
 func (w *dsWorker) Close() error {
 	var errs []interface{}

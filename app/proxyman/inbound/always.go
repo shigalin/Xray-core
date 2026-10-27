@@ -200,15 +200,13 @@ func (h *AlwaysOnInboundHandler) Close() error {
 	return nil
 }
 
-// StopAccepting stops every worker that can refuse new connections while its
-// established ones keep running. UDP workers serve all flows on one socket and
-// stay open until Close.
+// StopAccepting makes every worker refuse new connections. Stream listeners
+// keep their established connections; listeners that cannot (UDP sockets)
+// are closed and their clients reconnect to the successor instance.
 func (h *AlwaysOnInboundHandler) StopAccepting() error {
 	var errs []error
 	for _, worker := range h.workers {
-		if s, ok := worker.(interface{ StopAccepting() error }); ok {
-			errs = append(errs, s.StopAccepting())
-		}
+		errs = append(errs, worker.StopAccepting())
 	}
 	return errors.Combine(errs...)
 }

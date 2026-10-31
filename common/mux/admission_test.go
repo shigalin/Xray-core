@@ -29,9 +29,11 @@ func (d *admissionDispatcher) Dispatch(context.Context, net.Destination) (*trans
 	}
 	return nil, errors.New("unexpected fresh dispatch")
 }
+
 func (*admissionDispatcher) DispatchLink(context.Context, net.Destination, *transport.Link) error {
 	return nil
 }
+
 func (d *admissionDispatcher) RebindSession(ctx context.Context, link *transport.Link) error {
 	return d.rebind(ctx, link)
 }

@@ -465,6 +465,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 	tlsConfig := getTLSConfig(streamSettings)
 	l.isH3 = len(tlsConfig.NextProtos) == 1 && tlsConfig.NextProtos[0] == "h3"
 
+	var http2Config *http.HTTP2Config
 	var err error
 	if l.isH3 {
 		var pktConn net.PacketConn
@@ -526,6 +527,14 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 			_ = pktConn.Close()
 		}()
 	} else {
+		// Validate before opening a TCP/Unix listener or acquiring its path lock.
+		if len(l.config.H2Params) > 0 {
+			http2Config = new(http.HTTP2Config)
+			if err := json.Unmarshal(l.config.H2Params, http2Config); err != nil {
+				return nil, errors.New("failed to parse HTTP2Config").Base(err)
+			}
+		}
+
 		var addr net.Addr
 		if port == net.Port(0) { // unix
 			addr = &net.UnixAddr{Name: address.Domain(), Net: "unix"}
@@ -555,14 +564,6 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		}
 
 		handler.localAddr = l.listener.Addr()
-
-		var http2Config *http.HTTP2Config
-		if len(l.config.H2Params) > 0 {
-			http2Config = new(http.HTTP2Config)
-			if err := json.Unmarshal(l.config.H2Params, http2Config); err != nil {
-				return nil, errors.New("failed to parse HTTP2Config").Base(err)
-			}
-		}
 
 		// server can handle both plaintext HTTP/1.1 and h2c
 		protocols := new(http.Protocols)

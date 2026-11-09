@@ -131,7 +131,7 @@ func (r *TimeoutWrapperReader) ReadMultiBufferTimeout(duration time.Duration) (M
 		}
 		return r.mb, r.err
 	case <-timeout:
-		return nil, nil
+		return nil, ErrReadTimeout
 	}
 }
 

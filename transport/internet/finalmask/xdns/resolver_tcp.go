@@ -14,7 +14,7 @@ type TCPResolver struct {
 	dest   net.Destination
 	dialer *finalmask.Dialer
 
-	conns   map[net.Conn]struct{}
+	conns   map[int32]net.Conn // active connection by worker ID
 	udpAddr *net.UDPAddr
 	readCh  chan []byte
 	sendCh  chan []byte
@@ -30,7 +30,7 @@ func NewTCPResolver(config *ResolverProto, dialer *finalmask.Dialer) (Resolver, 
 	}
 	r := &TCPResolver{
 		dest:    dest,
-		conns:   make(map[net.Conn]struct{}),
+		conns:   make(map[int32]net.Conn),
 		dialer:  dialer,
 		readCh:  make(chan []byte),
 		sendCh:  make(chan []byte),
@@ -49,13 +49,13 @@ func (r *TCPResolver) closed() bool {
 	}
 }
 
-func (r *TCPResolver) registerConn(conn net.Conn) bool {
+func (r *TCPResolver) registerConn(workerID int32, conn net.Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed() {
 		return false
 	}
-	r.conns[conn] = struct{}{}
+	r.conns[workerID] = conn
 	switch v := conn.RemoteAddr().(type) {
 	case *net.TCPAddr:
 		r.udpAddr = &net.UDPAddr{IP: v.IP, Port: v.Port}
@@ -67,11 +67,14 @@ func (r *TCPResolver) registerConn(conn net.Conn) bool {
 	return true
 }
 
-func (r *TCPResolver) closeConn(conn net.Conn) {
+func (r *TCPResolver) closeConn(workerID int32) {
 	r.mu.Lock()
-	delete(r.conns, conn)
+	conn := r.conns[workerID]
+	delete(r.conns, workerID)
 	r.mu.Unlock()
-	_ = conn.Close()
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 func (r *TCPResolver) read(reader io.Reader, p []byte) (l int, err error) {
@@ -88,7 +91,7 @@ func (r *TCPResolver) read(reader io.Reader, p []byte) (l int, err error) {
 	return l, nil
 }
 
-func (r *TCPResolver) do(conn *net.Conn, buf *[4096 + 2]byte, p []byte) error {
+func (r *TCPResolver) do(workerID int32, conn *net.Conn, buf *[4096 + 2]byte, p []byte) error {
 	var err error
 	if *conn == nil {
 		*conn, err = r.dialer.DialTCP(r.dest)
@@ -96,7 +99,7 @@ func (r *TCPResolver) do(conn *net.Conn, buf *[4096 + 2]byte, p []byte) error {
 			*conn = nil
 			return err
 		}
-		if !r.registerConn(*conn) {
+		if !r.registerConn(workerID, *conn) {
 			_ = (*conn).Close()
 			*conn = nil
 			return io.ErrClosedPipe
@@ -110,7 +113,7 @@ func (r *TCPResolver) do(conn *net.Conn, buf *[4096 + 2]byte, p []byte) error {
 	copy(buf[2:], p)
 	_, err = c.Write(buf[:2+len(p)])
 	if err != nil {
-		r.closeConn(c)
+		r.closeConn(workerID)
 		*conn = nil
 		return err
 	}
@@ -118,7 +121,7 @@ func (r *TCPResolver) do(conn *net.Conn, buf *[4096 + 2]byte, p []byte) error {
 	b := pool4K.Get().([]byte)
 	l, err = r.read(c, b)
 	if err != nil {
-		r.closeConn(c)
+		r.closeConn(workerID)
 		*conn = nil
 		pool4K.Put(b[:cap(b)])
 		return err
@@ -131,15 +134,11 @@ func (r *TCPResolver) do(conn *net.Conn, buf *[4096 + 2]byte, p []byte) error {
 	return nil
 }
 
-func (r *TCPResolver) worker() {
+func (r *TCPResolver) worker(workerID int32) {
 	defer r.wg.Done()
+	defer r.closeConn(workerID)
 
 	var conn net.Conn
-	defer func() {
-		if conn != nil {
-			r.closeConn(conn)
-		}
-	}()
 	var buf [4096 + 2]byte
 	var p []byte
 	for {
@@ -153,16 +152,16 @@ func (r *TCPResolver) worker() {
 			case p = <-r.sendCh:
 			}
 		}
-		if err := r.do(&conn, &buf, p); err != nil && !r.closed() {
+		if err := r.do(workerID, &conn, &buf, p); err != nil && !r.closed() {
 			errors.LogErrorInner(context.Background(), err, "do err")
 		}
 	}
 }
 
-func (r *TCPResolver) run(worker int32) {
-	for range worker {
+func (r *TCPResolver) run(workers int32) {
+	for workerID := range workers {
 		r.wg.Add(1)
-		go r.worker()
+		go r.worker(workerID)
 	}
 	r.wg.Wait()
 	close(r.readCh)
@@ -209,11 +208,11 @@ func (r *TCPResolver) Close() {
 		return
 	}
 	close(r.closeCh)
-	// Detach under the registration lock so a concurrent dial cannot escape Close.
+	// Take ownership under the lock so workers cannot close these connections again.
 	conns := r.conns
 	r.conns = nil
 	r.mu.Unlock()
-	for conn := range conns {
+	for _, conn := range conns {
 		_ = conn.Close()
 	}
 }

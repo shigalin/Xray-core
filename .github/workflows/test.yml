@@ -49,6 +49,8 @@ jobs:
           go-version-file: go.mod
           check-latest: true
           cache: false
+      - name: Check Release Build Environment
+        run: python3 .github/build/test_release.py
       - name: Check Format
         run: go run ./infra/vformat/main.go -mode check -pwd ./
       - name: Check Protobuf

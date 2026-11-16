@@ -142,13 +142,13 @@ jobs:
           case "${GOARCH}:${GOOS}" in
             # Special processing for x86-64 and ARM64
             amd64:windows|amd64:darwin)
-              GOAMD64="v2"
+              export GOAMD64="v2"
               ;;
             arm64:windows)
-              GOARM64="v8.2"
+              export GOARM64="v8.2"
               ;;
             arm64:darwin)
-              GOARM64="v8.4"
+              export GOARM64="v8.4"
               ;;
           esac
           mkdir -p build_assets

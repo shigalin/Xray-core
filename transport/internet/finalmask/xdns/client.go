@@ -46,11 +46,12 @@ type xdnsClient struct {
 	resolverSends []atomic.Uint32
 	resolverIndex atomic.Uint32
 
-	readCh  chan packet
-	poolCh  chan struct{}
-	closeCh chan struct{}
-	wg      sync.WaitGroup
-	mu      sync.Mutex
+	readCh    chan packet
+	poolCh    chan struct{}
+	closeCh   chan struct{}
+	wg        sync.WaitGroup
+	mu        sync.Mutex
+	closeOnce sync.Once
 }
 
 func NewClient(c *Config, dialer *finalmask.Dialer) (net.PacketConn, error) {
@@ -203,6 +204,9 @@ func (c *xdnsClient) send(p []byte) {
 		}
 
 		for i := range fragN {
+			if c.closed() {
+				return
+			}
 			data[12] = fragID
 			data[13] = byte(i)
 			data[14] = byte(fragN)
@@ -356,9 +360,12 @@ func (c *xdnsClient) poll() {
 }
 
 func (c *xdnsClient) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	packet, ok := <-c.readCh
-	if ok {
-		return copy(p, packet.p), packet.addr, nil
+	select {
+	case <-c.closeCh:
+	case packet, ok := <-c.readCh:
+		if ok {
+			return copy(p, packet.p), packet.addr, nil
+		}
 	}
 	return 0, nil, io.ErrClosedPipe
 }
@@ -375,21 +382,26 @@ func (c *xdnsClient) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	}
 	c.send(p)
 	for range c.extraPoll {
+		if c.closed() {
+			break
+		}
 		c.send(nil)
+	}
+	if c.closed() {
+		return 0, io.ErrClosedPipe
 	}
 	return len(p), nil
 }
 
 func (c *xdnsClient) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed() {
-		return nil
-	}
-	close(c.closeCh)
-	for i := range c.resolvers {
-		c.resolvers[i].Close()
-	}
+	// WriteTo can hold mu while waiting for a resolver worker. Closing must
+	// interrupt that wait without acquiring the write lock.
+	c.closeOnce.Do(func() {
+		close(c.closeCh)
+		for _, resolver := range c.resolvers {
+			resolver.Close()
+		}
+	})
 	return nil
 }
 

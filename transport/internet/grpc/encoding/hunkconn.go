@@ -9,6 +9,7 @@ import (
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/common/signal/done"
+	"github.com/xtls/xray-core/transport/internet"
 )
 
 type HunkConn interface {
@@ -37,7 +38,11 @@ func NewHunkReadWriter(hc HunkConn, cancel context.CancelFunc) *HunkReaderWriter
 }
 
 func NewHunkConn(hc HunkConn, cancel context.CancelFunc, trustedXForwardedFor []string) net.Conn {
-	rAddr := remoteAddrFromContext(hc.Context(), trustedXForwardedFor)
+	return NewHunkConnWithSocketSettings(hc, cancel, &internet.SocketConfig{TrustedXForwardedFor: trustedXForwardedFor})
+}
+
+func NewHunkConnWithSocketSettings(hc HunkConn, cancel context.CancelFunc, socketSettings *internet.SocketConfig) net.Conn {
+	rAddr := remoteAddrFromContext(hc.Context(), socketSettings)
 	lAddr := localAddrFromContext(hc.Context())
 	wrc := NewHunkReadWriter(hc, cancel)
 	return cnc.NewConnection(

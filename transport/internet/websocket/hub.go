@@ -15,7 +15,6 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	http_proto "github.com/xtls/xray-core/common/protocol/http"
 	"github.com/xtls/xray-core/transport/internet"
 	v2tls "github.com/xtls/xray-core/transport/internet/tls"
 )
@@ -65,12 +64,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
-	remoteAddr := conn.RemoteAddr()
-	var trustedXFF []string
-	if h.socketSettings != nil {
-		trustedXFF = h.socketSettings.TrustedXForwardedFor
-	}
-	remoteAddr = http_proto.ApplyTrustedXForwardedFor(request.Header, trustedXFF, remoteAddr)
+	remoteAddr := h.socketSettings.ClientAddr(request.Header.Values, conn.RemoteAddr())
 
 	h.ln.addConn(NewConnection(conn, remoteAddr, extraReader, h.ln.config.HeartbeatPeriod))
 }

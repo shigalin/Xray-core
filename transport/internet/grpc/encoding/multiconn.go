@@ -9,6 +9,7 @@ import (
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/net/cnc"
 	"github.com/xtls/xray-core/common/signal/done"
+	"github.com/xtls/xray-core/transport/internet"
 )
 
 type MultiHunkConn interface {
@@ -32,7 +33,11 @@ func NewMultiHunkReadWriter(hc MultiHunkConn, cancel context.CancelFunc) *MultiH
 }
 
 func NewMultiHunkConn(hc MultiHunkConn, cancel context.CancelFunc, trustedXForwardedFor []string) net.Conn {
-	rAddr := remoteAddrFromContext(hc.Context(), trustedXForwardedFor)
+	return NewMultiHunkConnWithSocketSettings(hc, cancel, &internet.SocketConfig{TrustedXForwardedFor: trustedXForwardedFor})
+}
+
+func NewMultiHunkConnWithSocketSettings(hc MultiHunkConn, cancel context.CancelFunc, socketSettings *internet.SocketConfig) net.Conn {
+	rAddr := remoteAddrFromContext(hc.Context(), socketSettings)
 	lAddr := localAddrFromContext(hc.Context())
 	wrc := NewMultiHunkReadWriter(hc, cancel)
 	return cnc.NewConnection(

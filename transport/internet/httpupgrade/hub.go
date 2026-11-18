@@ -14,7 +14,6 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	http_proto "github.com/xtls/xray-core/common/protocol/http"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/stat"
 	v2tls "github.com/xtls/xray-core/transport/internet/tls"
@@ -99,12 +98,7 @@ func (s *server) upgrade(conn net.Conn) (stat.Connection, error) {
 		return nil, err
 	}
 
-	remoteAddr := conn.RemoteAddr()
-	var trustedXFF []string
-	if s.socketSettings != nil {
-		trustedXFF = s.socketSettings.TrustedXForwardedFor
-	}
-	remoteAddr = http_proto.ApplyTrustedXForwardedFor(req.Header, trustedXFF, remoteAddr)
+	remoteAddr := s.socketSettings.ClientAddr(req.Header.Values, conn.RemoteAddr())
 
 	return stat.Connection(newConnection(conn, remoteAddr)), nil
 }

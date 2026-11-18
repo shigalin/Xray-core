@@ -24,7 +24,6 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
-	http_proto "github.com/xtls/xray-core/common/protocol/http"
 	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/transport/internet"
 	"github.com/xtls/xray-core/transport/internet/hysteria/congestion"
@@ -175,11 +174,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			Port: remoteAddr.(*net.TCPAddr).Port,
 		}
 	}
-	var trustedXFF []string
-	if h.socketSettings != nil {
-		trustedXFF = h.socketSettings.TrustedXForwardedFor
-	}
-	remoteAddr = http_proto.ApplyTrustedXForwardedFor(request.Header, trustedXFF, remoteAddr)
+	remoteAddr = h.socketSettings.ClientAddr(request.Header.Values, remoteAddr)
 
 	var currentSession *httpSession
 	if sessionId != "" {

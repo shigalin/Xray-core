@@ -12,12 +12,18 @@ import (
 
 // ApplyTrustedXForwardedFor returns remoteAddr overridden by X-Forwarded-For only when a configured trusted header is present.
 func ApplyTrustedXForwardedFor(header http.Header, trusted []string, remoteAddr net.Addr) net.Addr {
-	value := header.Get("X-Forwarded-For")
-	if value == "" {
+	return ApplyTrustedXForwardedForValues(header.Values, trusted, remoteAddr)
+}
+
+// ApplyTrustedXForwardedForValues also accepts header lookups backed by gRPC metadata.
+func ApplyTrustedXForwardedForValues(values func(string) []string, trusted []string, remoteAddr net.Addr) net.Addr {
+	forwarded := values("X-Forwarded-For")
+	if len(forwarded) == 0 || forwarded[0] == "" {
 		return remoteAddr
 	}
+	value := forwarded[0]
 	for _, t := range trusted {
-		if len(header.Values(t)) > 0 {
+		if len(values(t)) > 0 {
 			if idx := strings.IndexByte(value, ','); idx >= 0 {
 				value = value[:idx]
 			}

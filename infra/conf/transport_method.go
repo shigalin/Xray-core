@@ -294,6 +294,7 @@ type SplitHTTPConfig struct {
 	Xmux                 XmuxConfig        `json:"xmux"`
 	DownloadSettings     *StreamConfig     `json:"downloadSettings"`
 	H2Params             json.RawMessage   `json:"h2Params"`
+	HTTPFallback         string            `json:"httpFallback"`
 	Extra                json.RawMessage   `json:"extra"`
 }
 
@@ -323,6 +324,7 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		extra.Host = c.Host
 		extra.Path = c.Path
 		extra.Mode = c.Mode
+		extra.HTTPFallback = c.HTTPFallback
 		c = &extra
 	}
 
@@ -497,6 +499,7 @@ func (c *SplitHTTPConfig) Build() (proto.Message, error) {
 		SessionIDTable:       c.SessionIDTable,
 		SessionIDLength:      newRangeConfig(c.SessionIDLength),
 		H2Params:             c.H2Params,
+		HttpFallback:         c.HTTPFallback,
 		Xmux: &splithttp.XmuxConfig{
 			MaxConcurrency:   newRangeConfig(c.Xmux.MaxConcurrency),
 			MaxConnections:   newRangeConfig(c.Xmux.MaxConnections),

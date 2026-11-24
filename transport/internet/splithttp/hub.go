@@ -42,6 +42,8 @@ type requestHandler struct {
 	sessions       sync.Map
 	localAddr      net.Addr
 	socketSettings *internet.SocketConfig
+	website        *websiteFallback
+	websiteHost    string
 }
 
 type httpSession struct {
@@ -95,15 +97,34 @@ func (h *requestHandler) upsertSession(sessionId string) *httpSession {
 
 func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if len(h.host) > 0 && !internet.IsValidHTTPHost(request.Host, h.host) {
+		if h.serveWebsite(writer, request) {
+			return
+		}
 		errors.LogInfo(context.Background(), "failed to validate host, request:", request.Host, ", config:", h.host)
 		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
 
 	if !strings.HasPrefix(request.URL.Path, h.path) {
+		if h.serveWebsite(writer, request) {
+			return
+		}
 		errors.LogInfo(context.Background(), "failed to validate path, request:", request.URL.Path, ", config:", h.path)
 		writer.WriteHeader(http.StatusNotFound)
 		return
+	}
+
+	// A real CORS preflight always carries Access-Control-Request-Method.
+	preflight := request.Method == "OPTIONS" && request.Header.Get("Access-Control-Request-Method") != ""
+	validRange := h.config.GetNormalizedXPaddingBytes()
+	var paddingValue, paddingPlacement string
+	validPadding := true
+	if !preflight {
+		paddingValue, paddingPlacement = h.config.ExtractXPaddingFromRequest(request, h.config.XPaddingObfsMode)
+		validPadding = h.config.IsPaddingValid(paddingValue, validRange.From, validRange.To, PaddingMethod(h.config.XPaddingMethod))
+		if !validPadding && h.serveWebsite(writer, request) {
+			return
+		}
 	}
 
 	h.config.WriteResponseHeader(writer, request.Method, request.Header)
@@ -126,9 +147,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 	h.config.ApplyXPaddingToResponse(writer, config)
 
-	// A real CORS preflight always carries Access-Control-Request-Method. An OPTIONS request without it is an
-	// uplink request (uplinkHTTPMethod: "OPTIONS") and must go through the normal handling below.
-	if request.Method == "OPTIONS" && request.Header.Get("Access-Control-Request-Method") != "" {
+	if preflight {
 		writer.WriteHeader(http.StatusOK)
 		return
 	}
@@ -141,10 +160,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		}
 	*/
 
-	validRange := h.config.GetNormalizedXPaddingBytes()
-	paddingValue, paddingPlacement := h.config.ExtractXPaddingFromRequest(request, h.config.XPaddingObfsMode)
-
-	if !h.config.IsPaddingValid(paddingValue, validRange.From, validRange.To, PaddingMethod(h.config.XPaddingMethod)) {
+	if !validPadding {
 		errors.LogInfo(context.Background(), "invalid padding ("+paddingPlacement+") length:", int32(len(paddingValue)))
 		writer.WriteHeader(http.StatusBadRequest)
 		return
@@ -436,6 +452,7 @@ type Listener struct {
 	config     *Config
 	addConn    internet.ConnHandler
 	isH3       bool
+	website    *websiteFallback
 }
 
 func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSettings *internet.MemoryStreamConfig, addConn internet.ConnHandler) (internet.Listener, error) {
@@ -458,6 +475,18 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		socketSettings: streamSettings.SocketSettings,
 	}
 	tlsConfig := getTLSConfig(streamSettings)
+	if target := l.config.GetHttpFallback(); target != "" {
+		handler.websiteHost = normalizeWebsiteHost(tlsConfig.ServerName)
+		if handler.websiteHost == "" || reality.ConfigFromStreamSettings(streamSettings) != nil {
+			return nil, errors.New("XHTTP HTTP fallback requires ordinary TLS with a serverName")
+		}
+		var err error
+		handler.website, err = newWebsiteFallback(target, int(port))
+		if err != nil {
+			return nil, err
+		}
+		l.website = handler.website
+	}
 	l.isH3 = len(tlsConfig.NextProtos) == 1 && tlsConfig.NextProtos[0] == "h3"
 
 	var http2Config *http.HTTP2Config
@@ -594,6 +623,9 @@ func (ln *Listener) Addr() net.Addr {
 
 // Close implements net.Listener.Close().
 func (ln *Listener) Close() error {
+	if ln.website != nil {
+		ln.website.close()
+	}
 	if ln.h3server != nil {
 		return ln.h3server.Close()
 	} else if ln.listener != nil {

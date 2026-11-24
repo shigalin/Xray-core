@@ -636,3 +636,19 @@ func TestXDriveXmux(t *testing.T) {
 		t.Error("Build accepted maxConnections with maxConcurrency")
 	}
 }
+
+func TestSplitHTTPHTTPFallbackNotOverriddenByExtra(t *testing.T) {
+	config := new(SplitHTTPConfig)
+	input := `{"path": "/x", "httpFallback": "127.0.0.1:8080", "extra": {"httpFallback": "127.0.0.1:9090", "noSSEHeader": true}}`
+	if err := json.Unmarshal([]byte(input), config); err != nil {
+		t.Fatal(err)
+	}
+	message, err := config.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := message.(*splithttp.Config)
+	if built.HttpFallback != "127.0.0.1:8080" || !built.NoSSEHeader {
+		t.Fatalf("httpFallback = %q, noSSEHeader = %v", built.HttpFallback, built.NoSSEHeader)
+	}
+}

@@ -29,7 +29,7 @@ var errSniffingTimeout = errors.New("timeout on sniffing")
 
 type cachedReader struct {
 	sync.Mutex
-	reader buf.TimeoutReader // *pipe.Reader or *buf.TimeoutWrapperReader
+	reader buf.TimeoutReader
 	cache  buf.MultiBuffer
 }
 
@@ -87,9 +87,7 @@ func (r *cachedReader) Interrupt() {
 		r.cache = buf.ReleaseMulti(r.cache)
 	}
 	r.Unlock()
-	if p, ok := r.reader.(*pipe.Reader); ok {
-		p.Interrupt()
-	}
+	common.Interrupt(r.reader)
 }
 
 // DefaultDispatcher is a default implementation of Dispatcher.
@@ -202,7 +200,9 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 		user = sessionInbound.User
 	}
 
-	link.Reader = &buf.TimeoutWrapperReader{Reader: link.Reader}
+	var uplinkCounter stats.Counter
+	native, nativeUplink := link.Reader.(routing.UplinkPolicyReceiver)
+	var waitUplink func(context.Context, int) error
 
 	var bandwidthManager bandwidth.Manager
 	if feat := core.MustFromContext(ctx).GetFeature(bandwidth.ManagerType()); feat != nil {
@@ -212,32 +212,43 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
 		p := policyManager.ForLevel(user.Level)
 		if p.Stats.UserUplink {
 			name := "user>>>" + user.Email + ">>>traffic>>>uplink"
-			if c, _ := statsManager.GetOrRegisterCounter(name); c != nil {
-				link.Reader.(*buf.TimeoutWrapperReader).Counter = c
-			}
+			uplinkCounter, _ = statsManager.GetOrRegisterCounter(name)
 		}
-		// The limiter goes inside the stats writer: splice copy counts user
-		// traffic only when the link writer itself is a SizeStatWriter.
-		link.Writer = applyBandwidthLimit(ctx, link.Writer, bandwidthManager, user)
-		if _, limited := link.Writer.(*RateLimitWriter); limited {
-			// Kernel splice would bypass the limiter; copy in user space, as on
-			// platforms without splice. Vision moves 2 to 1 only, never from 3.
-			sessionInbound.CanSpliceCopy = 3
+		var limiter *RateLimitWriter
+		if bandwidthManager != nil {
+			if userLimiter := bandwidthManager.GetUserLimiter(user.Email); userLimiter != nil {
+				limiter = &RateLimitWriter{Writer: link.Writer, Context: limiterContext(ctx), Limiter: userLimiter}
+				sessionInbound.CanSpliceCopy = 3
+				if !nativeUplink {
+					// Splice accounting recognizes a SizeStatWriter at the link boundary.
+					link.Writer = limiter
+				}
+			}
 		}
 		if p.Stats.UserDownlink {
 			name := "user>>>" + user.Email + ">>>traffic>>>downlink"
 			if c, _ := statsManager.GetOrRegisterCounter(name); c != nil {
-				link.Writer = &SizeStatWriter{
-					Counter: c,
-					Writer:  link.Writer,
+				if writer, ok := link.Writer.(interface{ SetDownlinkCounter(stats.Counter) bool }); !ok || !writer.SetDownlinkCounter(c) {
+					link.Writer = &SizeStatWriter{Counter: c, Writer: link.Writer}
 				}
 			}
+		}
+		if nativeUplink && limiter != nil {
+			// Mux payloads need framing, so Dispatch's limiter-before-counter order is safe.
+			limiter.Writer = link.Writer
+			link.Writer = limiter
+			waitUplink = limiter.Limiter.WaitN
 		}
 		if p.Stats.UserOnline {
 			trackOnlineIP(ctx, statsManager, user.Email, sessionInbound.Source.Address.String())
 		}
 	}
 
+	if nativeUplink {
+		native.SetUplinkPolicy(uplinkCounter, waitUplink)
+	} else {
+		link.Reader = &buf.TimeoutWrapperReader{Reader: link.Reader, Counter: uplinkCounter}
+	}
 	return link
 }
 
@@ -283,6 +294,13 @@ func (d *DefaultDispatcher) shouldOverride(ctx context.Context, result SniffResu
 	return false
 }
 
+func limiterContext(ctx context.Context) context.Context {
+	if session.TimeoutOnlyFromContext(ctx) && routing.SessionLifecycleFromContext(ctx) == nil {
+		return context.WithoutCancel(ctx)
+	}
+	return ctx
+}
+
 func applyBandwidthLimit(ctx context.Context, writer buf.Writer, limiter bandwidth.Manager, user *protocol.MemoryUser) buf.Writer {
 	if limiter == nil || user == nil || user.Email == "" {
 		return writer
@@ -291,7 +309,7 @@ func applyBandwidthLimit(ctx context.Context, writer buf.Writer, limiter bandwid
 	if lim == nil {
 		return writer
 	}
-	return &RateLimitWriter{Writer: writer, Limiter: lim, Context: ctx}
+	return &RateLimitWriter{Writer: writer, Limiter: lim, Context: limiterContext(ctx)}
 }
 
 // Dispatch implements routing.Dispatcher.

@@ -21,8 +21,10 @@ import (
 	feature_inbound "github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/routing"
+	"github.com/xtls/xray-core/proxy/vless/multiplex"
 	"github.com/xtls/xray-core/proxy/vmess"
 	"github.com/xtls/xray-core/proxy/vmess/encoding"
+	"github.com/xtls/xray-core/transport"
 	"github.com/xtls/xray-core/transport/internet/stat"
 )
 
@@ -185,44 +187,6 @@ func (h *Handler) RemoveUser(ctx context.Context, email string) error {
 	return nil
 }
 
-func transferResponse(timer signal.ActivityUpdater, session *encoding.ServerSession, request *protocol.RequestHeader, response *protocol.ResponseHeader, input buf.Reader, output *buf.BufferedWriter) error {
-	session.EncodeResponseHeader(response, output)
-
-	bodyWriter, err := session.EncodeResponseBody(request, output)
-	if err != nil {
-		return errors.New("failed to start decoding response").Base(err)
-	}
-	{
-		// Optimize for small response packet
-		data, err := input.ReadMultiBuffer()
-		if err != nil {
-			return err
-		}
-
-		if err := bodyWriter.WriteMultiBuffer(data); err != nil {
-			return err
-		}
-	}
-
-	if err := output.SetBuffered(false); err != nil {
-		return err
-	}
-
-	if err := buf.Copy(input, bodyWriter, buf.UpdateActivity(timer)); err != nil {
-		return err
-	}
-
-	account := request.User.Account.(*vmess.MemoryAccount)
-
-	if request.Option.Has(protocol.RequestOptionChunkStream) && !account.NoTerminationSignal {
-		if err := bodyWriter.WriteMultiBuffer(buf.MultiBuffer{}); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 // Process implements proxy.Inbound.Process().
 func (h *Handler) Process(ctx context.Context, network net.Network, connection stat.Connection, dispatcher routing.Dispatcher) error {
 	sessionPolicy := h.policyManager.ForLevel(0)
@@ -272,51 +236,67 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	inbound.Name = "vmess"
 	inbound.CanSpliceCopy = 3
 	inbound.User = request.User
-
 	sessionPolicy = h.policyManager.ForLevel(request.User.Level)
-
-	ctx, cancel := context.WithCancel(ctx)
-	timer := signal.CancelAfterInactivity(ctx, cancel, sessionPolicy.Timeouts.ConnectionIdle)
-
 	ctx = policy.ContextWithBufferPolicy(ctx, sessionPolicy.Buffer)
-	link, err := dispatcher.Dispatch(ctx, request.Destination())
-	if err != nil {
-		return errors.New("failed to dispatch request to ", request.Destination()).Base(err)
-	}
 
+	bodyReader, err := svrSession.DecodeRequestBody(request, reader)
+	if err != nil {
+		return errors.New("failed to start decoding").Base(err)
+	}
+	writer := buf.NewBufferedWriter(buf.NewWriter(connection))
+	response := &protocol.ResponseHeader{
+		Command: h.generateCommand(ctx, request),
+	}
+	svrSession.EncodeResponseHeader(response, writer)
+	bodyWriter, err := svrSession.EncodeResponseBody(request, writer)
+	if err != nil {
+		return errors.New("failed to start decoding response").Base(err)
+	}
+	writer.SetFlushNext()
+	link := &transport.Link{Reader: bodyReader, Writer: bodyWriter}
+
+	if request.Command == protocol.RequestCommandMux {
+		worker := multiplex.NewServerWorker(ctx, dispatcher.DispatchLink, link, routing.GetSessionRebinder(dispatcher))
+		<-worker.WaitClosed()
+		return worker.Err()
+	}
+	// Ordinary VMess keeps the dispatcher pipes for both directional
+	// limiters and the protocol's independent response termination.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	timer := signal.CancelAfterInactivity(ctx, cancel, sessionPolicy.Timeouts.ConnectionIdle)
+	outbound, err := dispatcher.Dispatch(ctx, request.Destination())
+	if err != nil {
+		return errors.New("failed to dispatch request").Base(err)
+	}
 	requestDone := func() error {
 		defer timer.SetTimeout(sessionPolicy.Timeouts.DownlinkOnly)
-
-		bodyReader, err := svrSession.DecodeRequestBody(request, reader)
-		if err != nil {
-			return errors.New("failed to start decoding").Base(err)
-		}
-		if err := buf.Copy(bodyReader, link.Writer, buf.UpdateActivity(timer)); err != nil {
-			return errors.New("failed to transfer request").Base(err)
-		}
-		return nil
+		return buf.Copy(bodyReader, outbound.Writer, buf.UpdateActivity(timer))
 	}
-
 	responseDone := func() error {
 		defer timer.SetTimeout(sessionPolicy.Timeouts.UplinkOnly)
-
-		writer := buf.NewBufferedWriter(buf.NewWriter(connection))
-		defer writer.Flush()
-
-		response := &protocol.ResponseHeader{
-			Command: h.generateCommand(ctx, request),
-		}
-		return transferResponse(timer, svrSession, request, response, link.Reader, writer)
+		account := request.User.Account.(*vmess.MemoryAccount)
+		return writeResponse(outbound.Reader, bodyWriter, writer,
+			request.Option.Has(protocol.RequestOptionChunkStream) && !account.NoTerminationSignal, timer)
 	}
-
-	requestDonePost := task.OnSuccess(requestDone, task.Close(link.Writer))
-	if err := task.Run(ctx, requestDonePost, responseDone); err != nil {
-		common.Interrupt(link.Reader)
-		common.Interrupt(link.Writer)
+	if err := task.Run(ctx, task.OnSuccess(requestDone, task.Close(outbound.Writer)), responseDone); err != nil {
+		common.Interrupt(outbound.Reader)
+		common.Interrupt(outbound.Writer)
 		return errors.New("connection ends").Base(err)
 	}
-
 	return nil
+}
+
+func writeResponse(input buf.Reader, body buf.Writer, output *buf.BufferedWriter, terminate bool, timer signal.ActivityUpdater) error {
+	if err := buf.Copy(input, body, buf.UpdateActivity(timer)); err != nil {
+		return err
+	}
+	if terminate {
+		if err := body.WriteMultiBuffer(nil); err != nil {
+			return err
+		}
+	}
+	return output.Flush()
 }
 
 // Stub command generator

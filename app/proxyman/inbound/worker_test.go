@@ -1,11 +1,32 @@
 package inbound
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/features/routing"
+	"github.com/xtls/xray-core/transport"
 )
+
+type rebindingDispatcher struct{ routing.Dispatcher }
+
+func (*rebindingDispatcher) RebindSession(context.Context, *transport.Link) error {
+	return nil
+}
+
+func TestInboundDispatcherPreservesOptionalRebind(t *testing.T) {
+	d := &inboundDispatcher{}
+	if rebinder := routing.GetSessionRebinder(d); rebinder != nil {
+		t.Fatal("dispatcher without session admission must not advertise it")
+	}
+	sessionDispatcher := &rebindingDispatcher{}
+	d.Dispatcher = sessionDispatcher
+	if rebinder := routing.GetSessionRebinder(d); rebinder != sessionDispatcher {
+		t.Fatal("inbound dispatcher hid session admission")
+	}
+}
 
 type fakeHub struct {
 	stopErr          error

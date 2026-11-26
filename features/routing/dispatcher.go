@@ -23,8 +23,19 @@ type Dispatcher interface {
 // SessionRebinder is an optional dispatcher hook for protocols that reuse a
 // previously dispatched link. It must run before delivering data from a new
 // authenticated session to that link. Policy remains with the dispatcher.
+// DispatchLink implementations with this hook publish the admitted link to
+// readers that implement SetSessionLink(transport.Link) before routing starts.
 type SessionRebinder interface {
 	RebindSession(ctx context.Context, link *transport.Link) error
+}
+
+// GetSessionRebinder preserves optional admission through dispatcher wrappers.
+func GetSessionRebinder(dispatcher Dispatcher) SessionRebinder {
+	if provider, ok := dispatcher.(interface{ SessionRebinder() SessionRebinder }); ok {
+		return provider.SessionRebinder()
+	}
+	rebinder, _ := dispatcher.(SessionRebinder)
+	return rebinder
 }
 
 // DispatcherType returns the type of Dispatcher interface. Can be used to implement common.HasType.

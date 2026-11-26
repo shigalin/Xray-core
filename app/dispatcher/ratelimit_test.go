@@ -3,6 +3,7 @@ package dispatcher
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/net"
@@ -139,5 +140,74 @@ func TestWrapLinkKeepsSpliceForUnlimitedUser(t *testing.T) {
 	_ = WrapLink(ctx, downlinkStatsPolicy{}, countingStats{counter: &testCounter{}}, link)
 	if inbound.CanSpliceCopy != 2 {
 		t.Fatalf("unlimited user CanSpliceCopy = %d, want 2", inbound.CanSpliceCopy)
+	}
+}
+
+type nativeStubReader struct{ stubReader }
+
+func (nativeStubReader) SetUplinkPolicy(featurestats.Counter, func(context.Context, int) error) {}
+
+func (nativeStubReader) ReadMultiBufferTimeout(time.Duration) (buf.MultiBuffer, error) {
+	return nil, buf.ErrReadTimeout
+}
+
+func TestWrapMuxLinkDoesNotCountDownlinkRejectedByLimiter(t *testing.T) {
+	inst := new(core.Instance)
+	bm := bandwidthfeat.New()
+	bm.SetUserLimiter("user@example.com", rate.NewLimiter(1, 4))
+	if err := inst.AddFeature(bm); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), core.XrayKey(1), inst)
+	ctx = session.ContextWithInbound(ctx, &session.Inbound{User: &protocol.MemoryUser{Email: "user@example.com"}})
+	counter := &testCounter{}
+	writer := &stubWriter{}
+	link := WrapLink(ctx, downlinkStatsPolicy{}, countingStats{counter: counter},
+		&transport.Link{Reader: nativeStubReader{}, Writer: writer})
+	if err := link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("12345"))}); err == nil {
+		t.Fatal("expected oversized batch to be rejected")
+	}
+	if err := link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("1234"))}); err != nil {
+		t.Fatal(err)
+	}
+	if counter.Value() != 4 || writer.calls != 1 {
+		t.Fatalf("charge=%d writes=%d, want 4 and 1", counter.Value(), writer.calls)
+	}
+}
+
+func TestWrapTimeoutOnlyMuxLinkSurvivesOuterContextAndStopsOnClose(t *testing.T) {
+	inst := new(core.Instance)
+	bm := bandwidthfeat.New()
+	lim := rate.NewLimiter(1, 4)
+	bm.SetUserLimiter("user@example.com", lim)
+	if err := inst.AddFeature(bm); err != nil {
+		t.Fatal(err)
+	}
+	baseCtx := context.WithValue(context.Background(), core.XrayKey(1), inst)
+	baseCtx = session.ContextWithInbound(baseCtx, &session.Inbound{User: &protocol.MemoryUser{Email: "user@example.com"}})
+	outerCtx, outerCancel := context.WithCancel(baseCtx)
+	ctx := session.ContextWithTimeoutOnly(outerCtx, true)
+	writer := &stubWriter{}
+	link := WrapLink(ctx, downlinkStatsPolicy{}, countingStats{counter: &testCounter{}},
+		&transport.Link{Reader: nativeStubReader{}, Writer: writer})
+
+	outerCancel()
+	if err := link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("1234"))}); err != nil {
+		t.Fatalf("TimeoutOnly downlink failed after outer Mux context ended: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes([]byte("1234"))})
+	}()
+	time.Sleep(15 * time.Millisecond)
+	link.Writer.(*RateLimitWriter).Interrupt()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("interrupted writer still completed throttled write")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Interrupt did not unblock RateLimitWriter wait")
 	}
 }

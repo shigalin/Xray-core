@@ -9,6 +9,7 @@ import (
 
 	"github.com/pires/go-proxyproto"
 	"github.com/xtls/xray-core/transport/internet"
+	finalmaskcustom "github.com/xtls/xray-core/transport/internet/finalmask/header/custom"
 )
 
 func TestCloudflareClientAddr(t *testing.T) {
@@ -105,6 +106,37 @@ func TestCloudflareClientAddr(t *testing.T) {
 		}
 		if internet.ProxyProtocolUsedFromContext(internet.ContextWithProxyProtocolConn(context.Background(), s2)) {
 			t.Fatalf("ProxyProtocolUsedFromContext(plain) = true, want false")
+		}
+	})
+
+	t.Run("ConnUsedProxyProtocol unwraps TCP FinalMask RawConn", func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+
+		proxyConn := proxyproto.NewConn(server, proxyproto.WithPolicy(proxyproto.REQUIRE))
+		maskedConn, err := (&finalmaskcustom.TCPConfig{}).WrapConnServer(proxyConn)
+		if err != nil {
+			t.Fatalf("WrapConnServer: %v", err)
+		}
+		go func() {
+			_, _ = io.WriteString(client, "PROXY TCP4 104.22.233.68 127.0.0.1 12345 443\r\nok")
+			_ = client.Close()
+		}()
+		if _, err := io.ReadAll(maskedConn); err != nil {
+			t.Fatalf("ReadAll(maskedConn): %v", err)
+		}
+		if !internet.ConnUsedProxyProtocol(maskedConn) {
+			t.Fatalf("ConnUsedProxyProtocol(maskedConn) = false, want true")
+		}
+		header := http.Header{}
+		header.Set("CF-Connecting-IP", "203.0.113.5")
+		cfg := &internet.SocketConfig{
+			CloudflareRealIp:        true,
+			ProxyProtocolTrustedIps: []string{"198.51.100.10"},
+		}
+		if got := cfg.ClientAddrWithProxyProtocol(header.Values, maskedConn.RemoteAddr(), internet.ConnUsedProxyProtocol(maskedConn)); got.String() != "104.22.233.68:12345" {
+			t.Fatalf("masked PROXY conn client address = %v, want 104.22.233.68:12345", got)
 		}
 	})
 }

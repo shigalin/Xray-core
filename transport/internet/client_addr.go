@@ -81,6 +81,14 @@ func ConnUsedProxyProtocol(conn net.Conn) bool {
 			conn = next
 			continue
 		}
+		if raw, ok := conn.(interface{ RawConn() net.Conn }); ok {
+			next := raw.RawConn()
+			if next == conn {
+				break
+			}
+			conn = next
+			continue
+		}
 		break
 	}
 	return false

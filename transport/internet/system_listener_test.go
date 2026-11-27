@@ -6,13 +6,17 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/pires/go-proxyproto"
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/finalmask/proxyprotocol"
+	"github.com/xtls/xray-core/transport/internet/tcp"
 )
 
 func TestRegisterListenerController(t *testing.T) {
@@ -195,5 +199,90 @@ func TestListenProxyProtocolTrustedIPs(t *testing.T) {
 		if err == nil {
 			t.Fatalf("ListenSystem on unix addr succeeded with ProxyProtocolTrustedIps, want error")
 		}
+	})
+
+	t.Run("ValidateInboundTCP/Unix and FinalMask.Listen reject invalid or conflicting proxy-protocol configs while ToMemoryStreamConfig allows outbounds", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			cfg  *internet.StreamConfig
+		}{
+			{
+				name: "sockopt proxyProtocolTrustedIPs",
+				cfg: &internet.StreamConfig{
+					ProtocolName: "tcp",
+					SocketSettings: &internet.SocketConfig{
+						ProxyProtocolTrustedIps: []string{"127.0.0.1"},
+					},
+					Tcpmasks: []*serial.TypedMessage{
+						serial.ToTypedMessage(&proxyprotocol.Config{Version: 2}),
+					},
+				},
+			},
+			{
+				name: "legacy tcp AcceptProxyProtocol",
+				cfg: &internet.StreamConfig{
+					ProtocolName: "tcp",
+					TransportSettings: []*internet.TransportConfig{
+						{
+							ProtocolName: "tcp",
+							Settings:     serial.ToTypedMessage(&tcp.Config{AcceptProxyProtocol: true}),
+						},
+					},
+					Tcpmasks: []*serial.TypedMessage{
+						serial.ToTypedMessage(&proxyprotocol.Config{Version: 2}),
+					},
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				mss, err := internet.ToMemoryStreamConfig(tc.cfg)
+				if err != nil {
+					t.Fatalf("ToMemoryStreamConfig(%s) unexpected error: %v", tc.name, err)
+				}
+				err = mss.ValidateInboundTCP()
+				if err == nil || !strings.Contains(err.Error(), "proxy-protocol") {
+					t.Fatalf("ValidateInboundTCP(%s) error = %v, want proxy-protocol conflict error", tc.name, err)
+				}
+				ln, err := mss.FinalMask.Listen(context.Background(), &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+				if ln != nil {
+					_ = ln.Close()
+				}
+				if err == nil || !strings.Contains(err.Error(), "proxy-protocol") {
+					t.Fatalf("FinalMask.Listen(%s) error = %v, want proxy-protocol conflict error", tc.name, err)
+				}
+			})
+		}
+
+		t.Run("ValidateInboundTCP rejects invalid protobuf trusted IP", func(t *testing.T) {
+			mss, err := internet.ToMemoryStreamConfig(&internet.StreamConfig{
+				ProtocolName: "tcp",
+				SocketSettings: &internet.SocketConfig{
+					ProxyProtocolTrustedIps: []string{"not-an-ip"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("ToMemoryStreamConfig: %v", err)
+			}
+			err = mss.ValidateInboundTCP()
+			if err == nil || !strings.Contains(err.Error(), "invalid proxyProtocolTrustedIPs") {
+				t.Fatalf("ValidateInboundTCP error = %v, want invalid proxyProtocolTrustedIPs", err)
+			}
+		})
+
+		t.Run("ValidateInboundUnix rejects non-empty trusted IPs", func(t *testing.T) {
+			mss, err := internet.ToMemoryStreamConfig(&internet.StreamConfig{
+				ProtocolName: "tcp",
+				SocketSettings: &internet.SocketConfig{
+					ProxyProtocolTrustedIps: []string{"127.0.0.1"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("ToMemoryStreamConfig: %v", err)
+			}
+			err = mss.ValidateInboundUnix()
+			if err == nil || !strings.Contains(err.Error(), "only supported on TCP listeners") {
+				t.Fatalf("ValidateInboundUnix error = %v, want TCP-only error", err)
+			}
+		})
 	})
 }

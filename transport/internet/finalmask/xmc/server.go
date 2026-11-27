@@ -61,6 +61,10 @@ type serverConn struct {
 	closeOnce sync.Once
 }
 
+func (c *serverConn) RawConn() net.Conn {
+	return c.c
+}
+
 func (c *serverConn) handshake() error {
 	c.handshakeLock.Lock()
 	defer c.handshakeLock.Unlock()

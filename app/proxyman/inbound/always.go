@@ -87,6 +87,14 @@ func NewAlwaysOnInboundHandler(ctx context.Context, tag string, receiverConfig *
 		return nil, errors.New("not an inbound proxy.")
 	}
 
+	nl := p.Network()
+	pl := receiverConfig.PortList
+	// Validate listener settings before registering stats counters.
+	if err := validateInboundListeners(mss, nl, pl); err != nil {
+		common.Close(p)
+		return nil, errors.New("invalid inbound stream config").Base(err)
+	}
+
 	dispatcher := new(inboundDispatcher)
 	if err := core.RequireFeatures(ctx, func(d routing.Dispatcher) { dispatcher.Dispatcher = d }); err != nil {
 		return nil, err
@@ -100,8 +108,6 @@ func NewAlwaysOnInboundHandler(ctx context.Context, tag string, receiverConfig *
 
 	uplinkCounter, downlinkCounter := getStatCounter(core.MustFromContext(ctx), tag)
 
-	nl := p.Network()
-	pl := receiverConfig.PortList
 	address := receiverConfig.Listen.AsAddress()
 	if address == nil {
 		address = net.AnyIP
@@ -176,6 +182,19 @@ func NewAlwaysOnInboundHandler(ctx context.Context, tag string, receiverConfig *
 	}
 
 	return h, nil
+}
+
+func validateInboundListeners(mss *internet.MemoryStreamConfig, nl []net.Network, pl *net.PortList) error {
+	if pl == nil {
+		if net.HasNetwork(nl, net.Network_UNIX) {
+			return mss.ValidateInboundUnix()
+		}
+		return nil
+	}
+	if len(pl.Range) > 0 && net.HasNetwork(nl, net.Network_TCP) {
+		return mss.ValidateInboundTCP()
+	}
+	return nil
 }
 
 // Start implements common.Runnable.

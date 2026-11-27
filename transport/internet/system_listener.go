@@ -253,6 +253,9 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 }
 
 func (dl *DefaultListener) ListenPacket(ctx context.Context, addr net.Addr, sockopt *SocketConfig) (net.PacketConn, error) {
+	if len(sockopt.GetProxyProtocolTrustedIps()) > 0 {
+		errors.LogWarning(ctx, "proxyProtocolTrustedIPs is ignored on UDP listener ", addr)
+	}
 	var lc net.ListenConfig
 
 	lc.Control = getControlFunc(ctx, sockopt, dl.controllers)

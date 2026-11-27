@@ -86,28 +86,6 @@ func Listen(ctx context.Context, address net.Address, port net.Port, settings *i
 	listener.ctx = ctx
 	listener.socketSettings = settings.SocketSettings
 
-	config := tls.ConfigFromStreamSettings(settings)
-
-	var options []grpc.ServerOption
-	var s *grpc.Server
-	var creds credentials.TransportCredentials
-	if config != nil {
-		// gRPC server may silently ignore TLS errors
-		creds = credentials.NewTLS(config.GetTLSConfig(tls.WithNextProto("h2")))
-	} else {
-		creds = insecure.NewCredentials()
-	}
-	options = append(options, grpc.Creds(encoding.NewProxyProtocolCredentials(creds)))
-	if grpcSettings.IdleTimeout > 0 || grpcSettings.HealthCheckTimeout > 0 {
-		options = append(options, grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    time.Second * time.Duration(grpcSettings.IdleTimeout),
-			Timeout: time.Second * time.Duration(grpcSettings.HealthCheckTimeout),
-		}))
-	}
-
-	s = grpc.NewServer(options...)
-	listener.s = s
-
 	if settings.SocketSettings.HasProxyProtocol() {
 		errors.LogWarning(ctx, "accepting PROXY protocol")
 	}
@@ -128,6 +106,33 @@ func Listen(ctx context.Context, address net.Address, port net.Port, settings *i
 	if err != nil {
 		return nil, errors.New("failed to listen on ", address, ":", port).Base(err)
 	}
+
+	config := tls.ConfigFromStreamSettings(settings)
+
+	var options []grpc.ServerOption
+	var s *grpc.Server
+	if settings.SocketSettings.GetCloudflareRealIp() {
+		var creds credentials.TransportCredentials
+		if config != nil {
+			// gRPC server may silently ignore TLS errors
+			creds = credentials.NewTLS(config.GetTLSConfig(tls.WithNextProto("h2")))
+		} else {
+			creds = insecure.NewCredentials()
+		}
+		options = append(options, grpc.Creds(encoding.NewProxyProtocolCredentials(creds)))
+	} else if config != nil {
+		// gRPC server may silently ignore TLS errors
+		options = append(options, grpc.Creds(credentials.NewTLS(config.GetTLSConfig(tls.WithNextProto("h2")))))
+	}
+	if grpcSettings.IdleTimeout > 0 || grpcSettings.HealthCheckTimeout > 0 {
+		options = append(options, grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    time.Second * time.Duration(grpcSettings.IdleTimeout),
+			Timeout: time.Second * time.Duration(grpcSettings.HealthCheckTimeout),
+		}))
+	}
+
+	s = grpc.NewServer(options...)
+	listener.s = s
 
 	errors.LogDebug(ctx, "gRPC listen for service name `"+grpcSettings.getServiceName()+"` tun `"+grpcSettings.getTunStreamName()+"` multi tun `"+grpcSettings.getTunMultiStreamName()+"`")
 	encoding.RegisterGRPCServiceServerX(s, listener, grpcSettings.getServiceName(), grpcSettings.getTunStreamName(), grpcSettings.getTunMultiStreamName())

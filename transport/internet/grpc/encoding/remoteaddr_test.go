@@ -2,12 +2,14 @@ package encoding
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"testing"
 
 	"github.com/pires/go-proxyproto"
 	"github.com/xtls/xray-core/transport/internet"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
@@ -115,6 +117,47 @@ func TestRemoteAddrFromContext(t *testing.T) {
 		})
 		if got := remoteAddrFromContext(proxyCtx, cfg); got.String() != edgeAddr.String() {
 			t.Fatalf("proxied peer = %s, want %s", got, edgeAddr)
+		}
+	})
+
+	t.Run("proxyProtocolAuthInfo preserves TLSInfo Channelz security value and CommonAuthInfo security level", func(t *testing.T) {
+		tlsInfo := credentials.TLSInfo{
+			State: tls.ConnectionState{
+				Version:     tls.VersionTLS13,
+				CipherSuite: tls.TLS_AES_128_GCM_SHA256,
+			},
+			CommonAuthInfo: credentials.CommonAuthInfo{
+				SecurityLevel: credentials.PrivacyAndIntegrity,
+			},
+		}
+		wrapped := proxyProtocolAuthInfo{AuthInfo: tlsInfo}
+		csi, ok := any(wrapped).(credentials.ChannelzSecurityInfo)
+		if !ok {
+			t.Fatalf("wrapped AuthInfo does not implement ChannelzSecurityInfo")
+		}
+		secVal, ok := csi.GetSecurityValue().(*credentials.TLSChannelzSecurityValue)
+		if !ok || secVal == nil {
+			t.Fatalf("GetSecurityValue() = %T, want non-nil *TLSChannelzSecurityValue", csi.GetSecurityValue())
+		}
+		if secVal.StandardName != tls.CipherSuiteName(tls.TLS_AES_128_GCM_SHA256) {
+			t.Fatalf("StandardName = %q, want %q", secVal.StandardName, tls.CipherSuiteName(tls.TLS_AES_128_GCM_SHA256))
+		}
+		if err := credentials.CheckSecurityLevel(wrapped, credentials.PrivacyAndIntegrity); err != nil {
+			t.Fatalf("CheckSecurityLevel(TLS) error = %v, want nil", err)
+		}
+
+		c1, s1 := net.Pipe()
+		defer c1.Close()
+		defer s1.Close()
+		_, insecureAuth, err := NewProxyProtocolCredentials(insecure.NewCredentials()).ServerHandshake(s1)
+		if err != nil {
+			t.Fatalf("ServerHandshake(insecure): %v", err)
+		}
+		if err := credentials.CheckSecurityLevel(insecureAuth, credentials.PrivacyAndIntegrity); err == nil {
+			t.Fatalf("CheckSecurityLevel(insecure, PrivacyAndIntegrity) = nil, want error")
+		}
+		if err := credentials.CheckSecurityLevel(insecureAuth, credentials.NoSecurity); err != nil {
+			t.Fatalf("CheckSecurityLevel(insecure, NoSecurity) = %v, want nil", err)
 		}
 	})
 }

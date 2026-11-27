@@ -22,6 +22,29 @@ func (a proxyProtocolAuthInfo) AuthType() string {
 	return "insecure"
 }
 
+func (a proxyProtocolAuthInfo) GetCommonAuthInfo() credentials.CommonAuthInfo {
+	if common, ok := a.AuthInfo.(interface {
+		GetCommonAuthInfo() credentials.CommonAuthInfo
+	}); ok {
+		return common.GetCommonAuthInfo()
+	}
+	return credentials.CommonAuthInfo{}
+}
+
+func (a proxyProtocolAuthInfo) GetSecurityValue() credentials.ChannelzSecurityValue {
+	if csi, ok := a.AuthInfo.(credentials.ChannelzSecurityInfo); ok {
+		return csi.GetSecurityValue()
+	}
+	return nil
+}
+
+func (a proxyProtocolAuthInfo) ValidateAuthority(authority string) error {
+	if av, ok := a.AuthInfo.(credentials.AuthorityValidator); ok {
+		return av.ValidateAuthority(authority)
+	}
+	return nil
+}
+
 func (a proxyProtocolAuthInfo) UsedProxyProtocol() bool {
 	return internet.ConnUsedProxyProtocol(a.conn)
 }

@@ -57,7 +57,7 @@ func ListenTCP(ctx context.Context, address net.Address, port net.Port, streamSe
 	}
 	errors.LogInfo(ctx, "listening ", addr.Network(), " on ", address, ":", port)
 
-	if streamSettings.SocketSettings != nil && streamSettings.SocketSettings.AcceptProxyProtocol {
+	if streamSettings.SocketSettings.HasProxyProtocol() {
 		errors.LogWarning(ctx, "accepting PROXY protocol")
 	}
 

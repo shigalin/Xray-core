@@ -151,6 +151,9 @@ message SocketConfig {
   repeated string trusted_x_forwarded_for = 23;
 
   bool cloudflare_real_ip = 24;
+
+  // TCP peers that must send a PROXY header on a listener shared with direct clients.
+  repeated string proxy_protocol_trusted_ips = 25;
 }
 
 message HappyEyeballsConfig {

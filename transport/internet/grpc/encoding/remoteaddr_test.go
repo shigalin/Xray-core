@@ -2,10 +2,13 @@ package encoding
 
 import (
 	"context"
+	"io"
 	"net"
 	"testing"
 
+	"github.com/pires/go-proxyproto"
 	"github.com/xtls/xray-core/transport/internet"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 )
@@ -63,4 +66,55 @@ func TestRemoteAddrFromContext(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("shared listener distinguishes direct Cloudflare peer from PROXY peer", func(t *testing.T) {
+		creds := NewProxyProtocolCredentials(insecure.NewCredentials())
+		cfg := &internet.SocketConfig{
+			CloudflareRealIp:        true,
+			AcceptProxyProtocol:     true,
+			ProxyProtocolTrustedIps: []string{"198.51.100.10"},
+		}
+		md := metadata.Pairs("CF-Connecting-IP", "2001:db8::42")
+		edgeAddr := &net.TCPAddr{IP: net.ParseIP("172.69.194.176"), Port: 12345}
+
+		// Direct connection (no PROXY header).
+		c1, s1 := net.Pipe()
+		defer c1.Close()
+		defer s1.Close()
+		_, directAuth, err := creds.ServerHandshake(s1)
+		if err != nil {
+			t.Fatalf("ServerHandshake(direct): %v", err)
+		}
+		directCtx := peer.NewContext(metadata.NewIncomingContext(context.Background(), md), &peer.Peer{
+			Addr:     edgeAddr,
+			AuthInfo: directAuth,
+		})
+		if got := remoteAddrFromContext(directCtx, cfg); got.String() != "[2001:db8::42]:0" {
+			t.Fatalf("direct Cloudflare peer = %s, want [2001:db8::42]:0", got)
+		}
+
+		// Connection with parsed PROXY protocol header.
+		c2, s2 := net.Pipe()
+		defer c2.Close()
+		defer s2.Close()
+		proxyConn := proxyproto.NewConn(s2, proxyproto.WithPolicy(proxyproto.REQUIRE))
+		go func() {
+			_, _ = io.WriteString(c2, "PROXY TCP4 172.69.194.176 127.0.0.1 12345 443\r\nok")
+			_ = c2.Close()
+		}()
+		_, proxyAuth, err := creds.ServerHandshake(proxyConn)
+		if err != nil {
+			t.Fatalf("ServerHandshake(proxy): %v", err)
+		}
+		if _, err := io.ReadAll(proxyConn); err != nil {
+			t.Fatalf("ReadAll(proxyConn): %v", err)
+		}
+		proxyCtx := peer.NewContext(metadata.NewIncomingContext(context.Background(), md), &peer.Peer{
+			Addr:     edgeAddr,
+			AuthInfo: proxyAuth,
+		})
+		if got := remoteAddrFromContext(proxyCtx, cfg); got.String() != edgeAddr.String() {
+			t.Fatalf("proxied peer = %s, want %s", got, edgeAddr)
+		}
+	})
 }

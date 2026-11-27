@@ -174,7 +174,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			Port: remoteAddr.(*net.TCPAddr).Port,
 		}
 	}
-	remoteAddr = h.socketSettings.ClientAddr(request.Header.Values, remoteAddr)
+	remoteAddr = h.socketSettings.ClientAddrWithProxyProtocol(request.Header.Values, remoteAddr, internet.ProxyProtocolUsedFromContext(request.Context()))
 
 	var currentSession *httpSession
 	if sessionId != "" {
@@ -570,6 +570,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 			MaxHeaderBytes:    l.config.GetNormalizedServerMaxHeaderBytes(),
 			Protocols:         protocols,
 			HTTP2:             http2Config,
+			ConnContext:       internet.ContextWithProxyProtocolConn,
 		}
 		go func() {
 			if err := l.server.Serve(l.listener); err != nil {

@@ -2,6 +2,7 @@ package internet
 
 import (
 	"context"
+	"net/netip"
 	"os"
 	"runtime"
 	"strconv"
@@ -74,7 +75,86 @@ func (conn *UnixConnWrapper) RemoteAddr() net.Addr {
 	}
 }
 
+// HasProxyProtocol reports whether the listener accepts PROXY protocol headers
+// on all connections or from configured trusted peers.
+func (x *SocketConfig) HasProxyProtocol() bool {
+	return x.GetAcceptProxyProtocol() || len(x.GetProxyProtocolTrustedIps()) > 0
+}
+
+// ValidateProxyProtocolTrustedIPs validates the configured IP/CIDR allowlist
+// for PROXY protocol peers.
+func ValidateProxyProtocolTrustedIPs(trustedIPs []string) error {
+	_, err := parseProxyProtocolTrustedIPs(trustedIPs)
+	return err
+}
+
+func parseProxyProtocolTrustedIPs(trustedIPs []string) ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(trustedIPs))
+	for _, raw := range trustedIPs {
+		if strings.Contains(raw, "/") {
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil {
+				return nil, errors.New("invalid CIDR: ", raw).Base(err)
+			}
+			if prefix.Addr().Is4In6() && prefix.Bits() >= 96 {
+				prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+			} else {
+				prefix = prefix.Masked()
+			}
+			prefixes = append(prefixes, prefix)
+			continue
+		}
+		addr, err := netip.ParseAddr(raw)
+		if err != nil || addr.Zone() != "" {
+			return nil, errors.New("invalid IP: ", raw)
+		}
+		addr = addr.Unmap()
+		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return prefixes, nil
+}
+
+func proxyProtocolTrustedPolicy(trustedIPs []string) (proxyproto.ConnPolicyFunc, error) {
+	prefixes, err := parseProxyProtocolTrustedIPs(trustedIPs)
+	if err != nil {
+		return nil, err
+	}
+	return func(opts proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+		tcpAddr, ok := opts.Upstream.(*net.TCPAddr)
+		if !ok || tcpAddr == nil {
+			return proxyproto.REJECT, proxyproto.ErrInvalidUpstream
+		}
+		ip, ok := netip.AddrFromSlice(tcpAddr.IP)
+		if !ok {
+			return proxyproto.REJECT, proxyproto.ErrInvalidUpstream
+		}
+		ip = ip.Unmap()
+		for _, prefix := range prefixes {
+			if prefix.Contains(ip) {
+				return proxyproto.REQUIRE, nil
+			}
+		}
+		return proxyproto.SKIP, nil
+	}, nil
+}
+
 func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *SocketConfig) (l net.Listener, err error) {
+	var proxyPolicy proxyproto.ConnPolicyFunc
+	if trustedIPs := sockopt.GetProxyProtocolTrustedIps(); len(trustedIPs) > 0 {
+		if _, ok := addr.(*net.TCPAddr); !ok {
+			return nil, errors.New("proxyProtocolTrustedIPs is only supported on TCP listeners")
+		}
+		// Classify the original TCP peer before reading anything from the connection.
+		proxyPolicy, err = proxyProtocolTrustedPolicy(trustedIPs)
+		if err != nil {
+			return nil, errors.New("invalid proxyProtocolTrustedIPs").Base(err)
+		}
+	} else if sockopt.GetAcceptProxyProtocol() {
+		proxyPolicy = func(proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
+			return proxyproto.REQUIRE, nil
+		}
+	}
+
 	var lc net.ListenConfig
 	var network, address string
 	// callback is called after the Listen function returns
@@ -166,9 +246,8 @@ func (dl *DefaultListener) Listen(ctx context.Context, addr net.Addr, sockopt *S
 	}
 
 	l, err = callback(lc.Listen(ctx, network, address))
-	if err == nil && sockopt != nil && sockopt.AcceptProxyProtocol {
-		policyFunc := func(upstream net.Addr) (proxyproto.Policy, error) { return proxyproto.REQUIRE, nil }
-		l = &proxyproto.Listener{Listener: l, Policy: policyFunc}
+	if err == nil && proxyPolicy != nil {
+		l = &proxyproto.Listener{Listener: l, ConnPolicy: proxyPolicy}
 	}
 	return l, err
 }

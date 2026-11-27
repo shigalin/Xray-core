@@ -64,7 +64,7 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		return
 	}
 
-	remoteAddr := h.socketSettings.ClientAddr(request.Header.Values, conn.RemoteAddr())
+	remoteAddr := h.socketSettings.ClientAddrWithProxyProtocol(request.Header.Values, conn.RemoteAddr(), internet.ConnUsedProxyProtocol(conn.NetConn()))
 
 	h.ln.addConn(NewConnection(conn, remoteAddr, extraReader, h.ln.config.HeartbeatPeriod))
 }
@@ -107,7 +107,7 @@ func ListenWS(ctx context.Context, address net.Address, port net.Port, streamSet
 	}
 	errors.LogInfo(ctx, "listening ", addr.Network(), "(for WS) on ", address, ":", port)
 
-	if streamSettings.SocketSettings != nil && streamSettings.SocketSettings.AcceptProxyProtocol {
+	if streamSettings.SocketSettings.HasProxyProtocol() {
 		errors.LogWarning(ctx, "accepting PROXY protocol")
 	}
 

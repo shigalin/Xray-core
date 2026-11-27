@@ -1,9 +1,11 @@
 package internet
 
 import (
+	"context"
 	"net/netip"
 	"strings"
 
+	"github.com/pires/go-proxyproto"
 	"github.com/xtls/xray-core/common/net"
 	httpProto "github.com/xtls/xray-core/common/protocol/http"
 )
@@ -36,10 +38,66 @@ var cloudflarePrefixes = [...]netip.Prefix{
 
 var cloudflarePseudoIPv4 = netip.MustParsePrefix("240.0.0.0/4")
 
-// ClientAddr resolves the address exposed to the inbound protocol.
+type proxyProtocolConnKey struct{}
+
+// ContextWithProxyProtocolConn attaches conn to ctx so HTTP handlers can
+// lazily check whether a PROXY protocol header was parsed on the connection.
+func ContextWithProxyProtocolConn(ctx context.Context, conn net.Conn) context.Context {
+	return context.WithValue(ctx, proxyProtocolConnKey{}, conn)
+}
+
+// ProxyProtocolUsedFromContext reports whether the connection stored in ctx
+// parsed a PROXY protocol header.
+func ProxyProtocolUsedFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	conn, _ := ctx.Value(proxyProtocolConnKey{}).(net.Conn)
+	return ConnUsedProxyProtocol(conn)
+}
+
+// ConnUsedProxyProtocol reports whether conn has a parsed PROXY protocol header.
+// Callers should invoke this after the connection has completed at least one read
+// (e.g. TLS handshake or HTTP/gRPC header parsing) so proxyproto.Conn has already
+// parsed any header without blocking.
+func ConnUsedProxyProtocol(conn net.Conn) bool {
+	for conn != nil {
+		if pc, ok := conn.(*proxyproto.Conn); ok {
+			return pc.ProxyHeader() != nil
+		}
+		if raw, ok := conn.(interface{ NetConn() net.Conn }); ok {
+			next := raw.NetConn()
+			if next == conn {
+				break
+			}
+			conn = next
+			continue
+		}
+		if raw, ok := conn.(interface{ Raw() net.Conn }); ok {
+			next := raw.Raw()
+			if next == conn {
+				break
+			}
+			conn = next
+			continue
+		}
+		break
+	}
+	return false
+}
+
+// ClientAddr resolves the address exposed to the inbound protocol when
+// per-connection PROXY protocol state is unavailable.
 func (c *SocketConfig) ClientAddr(values func(string) []string, peer net.Addr) net.Addr {
-	// With PROXY protocol, the listener has already replaced the socket peer.
-	if c.GetCloudflareRealIp() && !c.GetAcceptProxyProtocol() && isCloudflarePeer(peer) {
+	unconditionalProxy := c.GetAcceptProxyProtocol() && len(c.GetProxyProtocolTrustedIps()) == 0
+	return c.ClientAddrWithProxyProtocol(values, peer, unconditionalProxy)
+}
+
+// ClientAddrWithProxyProtocol resolves the address exposed to the inbound protocol,
+// using proxyProtocolUsed to distinguish connections whose peer was replaced by a
+// PROXY protocol header from direct connections on a shared listener.
+func (c *SocketConfig) ClientAddrWithProxyProtocol(values func(string) []string, peer net.Addr, proxyProtocolUsed bool) net.Addr {
+	if c.GetCloudflareRealIp() && !proxyProtocolUsed && isCloudflarePeer(peer) {
 		ip := singleIP(values("CF-Connecting-IP"))
 		if cloudflarePseudoIPv4.Contains(ip) {
 			ip = singleIP(values("CF-Connecting-IPv6"))

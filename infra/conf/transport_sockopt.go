@@ -64,10 +64,17 @@ type SocketConfig struct {
 	HappyEyeballsSettings *HappyEyeballsConfig   `json:"happyEyeballs"`
 	TrustedXForwardedFor  []string               `json:"trustedXForwardedFor"`
 	CloudflareRealIP      bool                   `json:"cloudflareRealIP"`
+
+	ProxyProtocolTrustedIPs []string `json:"proxyProtocolTrustedIPs"`
 }
 
 // Build implements Buildable.
 func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
+	if len(c.ProxyProtocolTrustedIPs) > 0 {
+		if err := internet.ValidateProxyProtocolTrustedIPs(c.ProxyProtocolTrustedIPs); err != nil {
+			return nil, errors.New("invalid proxyProtocolTrustedIPs").Base(err)
+		}
+	}
 	tfo := int32(0) // don't invoke setsockopt() for TFO
 	if c.TFO != nil {
 		switch v := c.TFO.(type) {
@@ -185,5 +192,7 @@ func (c *SocketConfig) Build() (*internet.SocketConfig, error) {
 		HappyEyeballs:        happyEyeballs,
 		TrustedXForwardedFor: c.TrustedXForwardedFor,
 		CloudflareRealIp:     c.CloudflareRealIP,
+
+		ProxyProtocolTrustedIps: c.ProxyProtocolTrustedIPs,
 	}, nil
 }

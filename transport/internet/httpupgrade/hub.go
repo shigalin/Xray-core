@@ -98,7 +98,7 @@ func (s *server) upgrade(conn net.Conn) (stat.Connection, error) {
 		return nil, err
 	}
 
-	remoteAddr := s.socketSettings.ClientAddr(req.Header.Values, conn.RemoteAddr())
+	remoteAddr := s.socketSettings.ClientAddrWithProxyProtocol(req.Header.Values, conn.RemoteAddr(), internet.ConnUsedProxyProtocol(conn))
 
 	return stat.Connection(newConnection(conn, remoteAddr)), nil
 }
@@ -147,7 +147,7 @@ func ListenHTTPUpgrade(ctx context.Context, address net.Address, port net.Port, 
 	}
 	errors.LogInfo(ctx, "listening ", addr.Network(), "(for HttpUpgrade) on ", address, ":", port)
 
-	if streamSettings.SocketSettings != nil && streamSettings.SocketSettings.AcceptProxyProtocol {
+	if streamSettings.SocketSettings.HasProxyProtocol() {
 		errors.LogWarning(ctx, "accepting PROXY protocol")
 	}
 

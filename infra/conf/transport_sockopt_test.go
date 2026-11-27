@@ -121,7 +121,7 @@ func TestSocketConfigProxyProtocolTrustedIPs(t *testing.T) {
 	})
 
 	t.Run("unix inbound rejects proxyProtocolTrustedIPs during preflight", func(t *testing.T) {
-		raw := `{"protocol":"dokodemo-door","listen":"/tmp/xray-test.sock","settings":{"address":"127.0.0.1","port":80,"network":"tcp"},"streamSettings":{"sockopt":{"proxyProtocolTrustedIPs":["127.0.0.1"]}}}`
+		raw := `{"protocol":"dokodemo-door","listen":"@xray-proxy-protocol-test.sock","settings":{"address":"127.0.0.1","port":80,"network":"tcp"},"streamSettings":{"sockopt":{"proxyProtocolTrustedIPs":["127.0.0.1"]}}}`
 		err := preflightInbound(t, raw)
 		if err == nil || !strings.Contains(err.Error(), "only supported on TCP listeners") {
 			t.Fatalf("preflight(unix) error = %v, want TCP-only error", err)
